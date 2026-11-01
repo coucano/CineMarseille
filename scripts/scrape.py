@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""Récupère les séances de cinéma de Marseille et d'Aix-en-Provence sur AlloCiné
+et écrit site/data/showtimes.json.
+
+Usage : python3 scripts/scrape.py [--days 7] [--limit-theaters N]
+"""
+import argparse
+import concurrent.futures as cf
+import gzip
+import datetime as dt
+from zoneinfo import ZoneInfo
+import html
+import json
+import os
+import re
+import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+
+BASE = "https://www.allocine.fr"
+CITIES = {"87914": "Marseille", "87860": "Aix-en-Provence"}  # identifiants de ville AlloCiné
+TZ = ZoneInfo("Europe/Paris")
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(ROOT, "site", "data", "showtimes.json")
+CORRECTIONS = os.path.join(ROOT, "scripts", "corrections-letterboxd.json")
+LB_CACHE = os.path.join(ROOT, "site", "data", "letterboxd-map.json")
+
+
+def area_of(theater):
+    """(quartier, zone) d'un cinéma : l'arrondissement à Marseille (d'après le code postal),
+    le centre-ville à Aix."""
+    addr = theater.get("address") or ""
+    if theater["city"] == "Marseille":
+        m = re.search(r"\b130(\d\d)\b", addr)
+        n = int(m.group(1)) if m else 0
+        if 1 <= n <= 16:
+            return ("1er arr." if n == 1 else f"{n}e arr.", "Marseille")
+        return ("Autres", "Marseille")
+    return ("Centre", theater["city"])
+
+
+def get(url, tries=3):
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "fr-FR,fr;q=0.9"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            if i == tries - 1:
+                raise
+        except Exception:
+            if i == tries - 1:
+                raise
+        time.sleep(2 * (i + 1))
+
+
+def list_theaters():
+    theaters = {}
+    for city_id, city in CITIES.items():
+        page, last = 1, 1
+        while True:
+            s = get(f"{BASE}/salle/cinema/ville-{city_id}/" + (f"?page={page}" if page > 1 else ""))
+            if not s:
+                break
+            found = 0
+            # chaque cinéma : son bloc data-theater, puis son adresse avant le cinéma suivant
+            parts = re.split(r'(?=data-theater=")', s)
+            for part in parts[1:]:
+                t = json.loads(html.unescape(re.match(r'data-theater="([^"]*)"', part).group(1)))
+                if t["id"] in theaters:
+                    continue
+                theaters[t["id"]] = {"name": t["name"].strip(), "city": city}
+                found += 1
+                m = re.search(r"<address[^>]*>(.*?)</address>", part, re.S)
+                if m:
+                    theaters[t["id"]]["address"] = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()
+            if page == 1:
+                last = max([int(n) for n in re.findall(r"\?page=(\d+)", s)] or [1])
+            if not found or page >= last:
+                break
+            page += 1
+    return theaters
+
+
+def version_of(key, st, movie):
+    """vo : version originale sous-titrée, vf : doublée en français, fr : film français."""
+    dv = st.get("diffusionVersion") or ""
+    if dv == "DUBBED" or key.startswith("dubbed"):
+        return "vf"
+    langs = movie.get("languages") or []
+    if dv == "LOCAL" or "FRENCH" in langs:
+        return "fr"
+    return "vo"
+
+
+def fetch_theater_day(tid, day):
+    out = []
+    page = 1
+    while True:
+        url = f"{BASE}/_/showtimes/theater-{tid}/d-{day}/" + (f"p-{page}/" if page > 1 else "")
+        s = get(url)
+        if not s:
+            break
+        d = json.loads(s)
+        out.extend(d.get("results") or [])
+        pag = d.get("pagination") or {}
+        if page >= int(pag.get("totalPages") or 1):
+            break
+        page += 1
+    return out
+
+
+TRACKING = re.compile(r"^(utm_|xtor$)", re.I)
+
+
+def ticket_url(st):
+    """Lien d'achat de la séance (vide si aucun), sans les codes de suivi commerciaux."""
+    for t in (st.get("data") or {}).get("ticketing") or []:
+        for u in t.get("urls") or []:
+            if not u.startswith("http"):
+                continue
+            p = urllib.parse.urlsplit(u)
+            q = [(k, v) for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True) if not TRACKING.match(k)]
+            return urllib.parse.urlunsplit(p._replace(query=urllib.parse.urlencode(q)))
+    return ""
+
+
+def movie_info(m):
+    year = (m.get("data") or {}).get("productionYear")
+    # date de sortie en salles en France (et non les sorties en VOD / streaming)
+    release, rerelease = None, False
+    for r in m.get("releases") or []:
+        rd = (r.get("releaseDate") or {}).get("date")
+        in_theaters = "THEATER" in ((r.get("releaseTags") or {}).get("tagTypes") or [])
+        if r.get("name") == "ReRelease" and in_theaters:
+            rerelease = True
+        elif r.get("name") == "Released" and in_theaters and rd and len(rd) >= 10 and not release:
+            release = rd[:10]
+    this_year = dt.date.today().year
+    # reprise : film sorti en salles il y a au moins deux ans (ou très ancien, sans date connue)
+    reprise = bool(
+        (release and int(release[:4]) <= this_year - 2)
+        or (not release and year and year <= this_year - 3)
+    )
+    directors = [
+        " ".join(filter(None, [c["person"].get("firstName"), c["person"].get("lastName")]))
+        for c in m.get("credits") or []
+        if (c.get("position") or {}).get("name") == "DIRECTOR" and c.get("person")
+    ]
+    return {
+        "title": (m.get("title") or "").strip(),
+        "original": (m.get("originalTitle") or "").strip(),
+        "year": year,
+        "release": release,
+        "runtime": m.get("runtime"),
+        "genres": [g.get("translate") for g in m.get("genres") or [] if g.get("translate")],
+        "directors": directors,
+        "countries": [c.get("localizedName") or c.get("name") for c in m.get("countries") or []],
+        "langs": m.get("languages") or [],
+        "reprise": reprise or (rerelease and bool(year) and year <= this_year - 2),
+        "premiere": bool((m.get("customFlags") or {}).get("isPremiere")),
+        "poster": (m.get("poster") or {}).get("url"),
+        "url": f"{BASE}/film/fichefilm_gen_cfilm={m['internalId']}.html",
+    }
+
+
+def lb_slugify(s):
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    s = s.lower().replace("'", "").replace("’", "")
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s
+
+
+def lb_year(slug):
+    """Année du film Letterboxd pour ce slug, ou None si la page n'existe pas."""
+    try:
+        s = get(f"https://letterboxd.com/film/{slug}/", tries=2)
+    except Exception:
+        return None
+    if not s:
+        return None
+    m = re.search(r'<meta property="og:title" content="[^"]*\((\d{4})\)"', s)
+    return int(m.group(1)) if m else None
+
+
+def lb_details(slug):
+    """Note moyenne Letterboxd, nombre de notes et identifiant IMDb d'un film."""
+    try:
+        s = get(f"https://letterboxd.com/film/{slug}/", tries=2) or ""
+    except Exception:
+        return {}
+    out = {}
+    m = re.search(r'"ratingValue":([0-9.]+)', s)
+    if m:
+        out["lbRating"] = round(float(m.group(1)), 2)
+    m = re.search(r'"ratingCount":(\d+)', s)
+    if m:
+        out["lbVotes"] = int(m.group(1))
+    m = re.search(r"imdb\.com/title/(tt\d+)", s)
+    if m:
+        out["imdb"] = m.group(1)
+    return out
+
+
+def add_imdb_ratings(films):
+    """Notes IMDb depuis le fichier public d'IMDb (datasets.imdbws.com)."""
+    wanted = {f["imdb"]: f for f in films.values() if f.get("imdb")}
+    if not wanted:
+        return
+    try:
+        req = urllib.request.Request("https://datasets.imdbws.com/title.ratings.tsv.gz", headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=120) as r, gzip.open(r, "rt") as fh:
+            for line in fh:
+                tid, _, rest = line.partition("\t")
+                if tid in wanted:
+                    rating, votes = rest.strip().split("\t")
+                    wanted[tid]["imdbRating"] = float(rating)
+                    wanted[tid]["imdbVotes"] = int(votes)
+    except Exception as e:
+        print(f"Notes IMDb indisponibles : {e}")
+
+
+def wikidata_letterboxd(fids):
+    """Slugs Letterboxd via Wikidata : les films y sont reliés à leur fiche AlloCiné
+    et à Letterboxd, TMDB ou IMDb."""
+    if not fids:
+        return {}
+    query = """SELECT ?ac ?lb ?tmdb ?imdb WHERE {
+      VALUES ?ac { %s }
+      ?f wdt:P1265 ?ac.
+      OPTIONAL { ?f wdt:P6127 ?lb. } OPTIONAL { ?f wdt:P4947 ?tmdb. } OPTIONAL { ?f wdt:P345 ?imdb. }
+    }""" % " ".join(f'"{f}"' for f in fids)
+    try:
+        req = urllib.request.Request(
+            "https://query.wikidata.org/sparql",
+            data=urllib.parse.urlencode({"query": query}).encode(),
+            headers={"User-Agent": "cine-marseille/1.0 (https://github.com/coucano/CineMarseille)", "Accept": "application/sparql-results+json"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            rows = json.load(r)["results"]["bindings"]
+    except Exception as e:
+        print(f"Wikidata indisponible : {e}")
+        return {}
+    out = {}
+    for row in rows:
+        fid = row["ac"]["value"]
+        if fid in out:
+            continue
+        if "lb" in row:
+            out[fid] = row["lb"]["value"]
+            continue
+        # sinon, Letterboxd redirige /tmdb/<id>/ et /imdb/<id>/ vers la fiche du film
+        for kind in ("tmdb", "imdb"):
+            if kind in row:
+                slug = lb_redirect(f"https://letterboxd.com/{kind}/{row[kind]['value']}/")
+                if slug:
+                    out[fid] = slug
+                    break
+    return out
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def lb_redirect(url):
+    try:
+        urllib.request.build_opener(_NoRedirect).open(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=30)
+    except urllib.error.HTTPError as e:
+        m = re.search(r"/film/([^/]+)/", e.headers.get("Location") or "")
+        return m.group(1) if m else None
+    except Exception:
+        return None
+    return None
+
+
+def resolve_letterboxd(film):
+    """Devine le slug Letterboxd d'un film à partir de son titre original et de son année."""
+    years = [film.get("year")]
+    if film.get("release"):
+        years.append(int(film["release"][:4]))
+    years = {y for y in years if y}
+    for title in dict.fromkeys([film["original"], film["title"]]):
+        base = lb_slugify(title)
+        if not base:
+            continue
+        cands = [f"{base}-{y}" for y in sorted(years)] + [base]
+        for c in cands:
+            y = lb_year(c)
+            if y and (not years or any(abs(y - yy) <= 1 for yy in years)):
+                return c
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--limit-theaters", type=int, default=0)
+    args = ap.parse_args()
+
+    today = dt.datetime.now(TZ).date()  # heure de Paris
+    days = [(today + dt.timedelta(days=i)).isoformat() for i in range(args.days)]
+
+    theaters = list_theaters()
+    for t in theaters.values():
+        t["bairro"], t["zone"] = area_of(t)
+        del t["city"]
+    print(f"{len(theaters)} cinémas trouvés")
+    tids = list(theaters)[: args.limit_theaters or None]
+
+    films, shows = {}, []
+    jobs = [(t, d) for t in tids for d in days]
+    with cf.ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {ex.submit(fetch_theater_day, t, d): (t, d) for t, d in jobs}
+        for f in cf.as_completed(futs):
+            tid, day = futs[f]
+            try:
+                results = f.result()
+            except Exception as e:
+                print(f"  échec {tid} {day}: {e}")
+                continue
+            for r in results:
+                m = r.get("movie")
+                if not m:
+                    continue
+                fid = str(m["internalId"])
+                if fid not in films:
+                    films[fid] = movie_info(m)
+                for key, lst in (r.get("showtimes") or {}).items():
+                    for st in lst or []:
+                        tags = st.get("tags") or []
+                        extra = [p for p in (st.get("projection") or []) if p not in ("DIGITAL",)]
+                        if any("3D" in t for t in tags):
+                            extra.append("3D")
+                        shows.append([fid, tid, st["startsAt"][:16], version_of(key, st, m), sorted(set(extra)), ticket_url(st)])
+
+    # Correspondance Letterboxd, en cache d'une exécution à l'autre
+    try:
+        cache = json.load(open(LB_CACHE))
+    except Exception:
+        cache = {}
+    # 1) corrections manuelles, 2) Wikidata (correspondance exacte), 3) devinette par le titre
+    try:
+        corrections = json.load(open(CORRECTIONS))
+    except Exception:
+        corrections = {}
+    wiki = wikidata_letterboxd(list(films))
+    print(f"Wikidata : {len(wiki)} films reconnus")
+    for fid, slug in list(wiki.items()) + [(k, v) for k, v in corrections.items() if k in films]:
+        cache[fid] = slug
+        cache[f"{fid}:t"] = int(time.time())
+    todo = [fid for fid in films if fid not in cache or (cache[fid] is None and cache.get(f"{fid}:t", 0) < time.time() - 3 * 86400)]
+    print(f"{len(films)} films, {len(todo)} à chercher sur Letterboxd")
+    with cf.ThreadPoolExecutor(max_workers=4) as ex:
+        for fid, slug in zip(todo, ex.map(lambda i: resolve_letterboxd(films[i]), todo)):
+            cache[fid] = slug
+            cache[f"{fid}:t"] = int(time.time())
+    for fid, f in films.items():
+        f["lb"] = cache.get(fid)
+
+    # Notes Letterboxd (et identifiant IMDb), relues à chaque exécution
+    with_lb = [f for f in films.values() if f["lb"]]
+    with cf.ThreadPoolExecutor(max_workers=4) as ex:
+        for f, info in zip(with_lb, ex.map(lambda f: lb_details(f["lb"]), with_lb)):
+            f.update(info)
+    add_imdb_ratings(films)
+
+    used = {s[1] for s in shows}
+    shows.sort(key=lambda s: (s[2], s[1]))
+    data = {
+        "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "days": days,
+        "theaters": {t: theaters[t] for t in tids if t in used},
+        "films": films,
+        "shows": shows,
+    }
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    with open(OUT, "w") as fh:
+        json.dump(data, fh, ensure_ascii=False, separators=(",", ":"))
+    with open(LB_CACHE, "w") as fh:
+        json.dump(cache, fh, ensure_ascii=False, indent=0, sort_keys=True)
+    print(f"OK : {len(shows)} séances, {len(films)} films, {len(data['theaters'])} cinémas")
+
+
+if __name__ == "__main__":
+    main()
