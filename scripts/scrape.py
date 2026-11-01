@@ -87,6 +87,34 @@ def list_theaters():
     return theaters
 
 
+# cartes illimitées, d'après la rubrique « Cartes acceptées » de la page tarifs AlloCiné
+CARDS = {"ugc": ("ugc illimite", "illimite ugc", "carte ugc"), "pathe": ("cinepass", "le pass gaumont", "le pass pathe")}
+
+
+def plain(s):
+    s = unicodedata.normalize("NFKD", html.unescape(s)).encode("ascii", "ignore").decode().lower()
+    return re.sub(r"\s+", " ", s)
+
+
+def theater_cards(tid):
+    """Cartes illimitées acceptées par un cinéma (« ugc », « pathe »),
+    ou None si la page AlloCiné n'a pas pu être lue."""
+    try:
+        s = get(f"{BASE}/salle/cinema-{tid}/tarifs/")
+    except Exception:
+        return None
+    if not s:
+        return None
+    s = plain(re.sub(r"<[^>]+>", " ", re.sub(r"<(script|style)\b.*?</\1>", " ", s, flags=re.S)))
+    i = s.find("cartes acceptees")
+    if i < 0:
+        return []
+    part = s[i:i + 600]
+    end = part.find(" tarif", 20)  # la rubrique s'arrête à la liste des tarifs
+    part = part[:end] if end > 0 else part
+    return sorted(k for k, words in CARDS.items() if any(w in part for w in words))
+
+
 def version_of(key, st, movie):
     """vo : version originale sous-titrée, vf : doublée en français, fr : film français."""
     dv = st.get("diffusionVersion") or ""
@@ -313,6 +341,18 @@ def main():
         del t["city"]
     print(f"{len(theaters)} cinémas trouvés")
     tids = list(theaters)[: args.limit_theaters or None]
+
+    # cartes acceptées ; si la page n'a pas pu être lue, on garde la valeur précédente
+    try:
+        old = json.load(open(OUT)).get("theaters", {})
+    except Exception:
+        old = {}
+    with cf.ThreadPoolExecutor(max_workers=6) as ex:
+        for tid, cards in zip(tids, ex.map(theater_cards, tids)):
+            if cards is None:
+                cards = old.get(tid, {}).get("cards", [])
+            theaters[tid]["cards"] = cards
+    print("Cartes :", {theaters[t]["name"]: theaters[t]["cards"] for t in tids if theaters[t]["cards"]})
 
     films, shows = {}, []
     jobs = [(t, d) for t in tids for d in days]

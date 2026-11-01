@@ -1,7 +1,8 @@
 # Ciné Marseille
 
 Les séances de cinéma de la semaine à Marseille et Aix-en-Provence (source : AlloCiné), avec les films
-de ta watchlist Letterboxd mis en évidence et un filtre VO / VF.
+de ta watchlist Letterboxd mis en évidence, un filtre VO / VF et un filtre par carte illimitée
+(UGC Illimité, CinéPass Pathé).
 
 Le site : https://cine-marseille.vercel.app/
 
@@ -9,6 +10,8 @@ Adapté de [cine-rio](https://github.com/coucano/cine-rio).
 
 - `scripts/scrape.py` récupère les séances des cinémas listés par AlloCiné pour Marseille et Aix
   (identifiants de ville dans `CITIES`) et écrit `site/data/showtimes.json`.
+  Il lit aussi, sur la page tarifs AlloCiné de chaque cinéma, les cartes illimitées acceptées
+  (rubrique « Cartes acceptées »).
   Il tourne chaque nuit grâce à GitHub Actions (`.github/workflows/refresh.yml`).
 - `site/index.html` est la page du site.
 - `api/watchlist.js` renvoie la watchlist d'un pseudo Letterboxd. Elle est lue sur Letterboxd

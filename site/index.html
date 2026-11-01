@@ -178,6 +178,7 @@
       <option value="imdb" data-i18n="sortImdb"></option>
       <option value="n" data-i18n="sortN"></option>
     </select>
+    <select id="card"></select>
     <select id="lang"><option value="" data-i18n="allLangs"></option></select>
     <details id="areas" class="pick">
       <summary id="areasum"></summary>
@@ -209,8 +210,10 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
-const state = { day: "", version: "all", onlyWl: false, ths: new Set(), after: "", q: "", sort: "wl", lang: "", bairros: new Set(), view: "film" };
+const state = { day: "", version: "all", onlyWl: false, ths: new Set(), after: "", q: "", sort: "wl", lang: "", card: "", bairros: new Set(), view: "film" };
 const ZONES = ["Marseille", "Aix-en-Provence", "Autres"];
+// cartes illimitées (champ « cards » de chaque cinéma, lu sur AlloCiné)
+const CARDS = { ugc: "UGC Illimité", pathe: "CinéPass Pathé" };
 
 const LOCALE = "fr-FR";
 const plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
@@ -221,6 +224,8 @@ const T = {
   all: "Tout", voTitle: "Version originale sous-titrée, et films français", vfTitle: "Version française (films doublés)",
   filters: "Filtres", onlyWl: "Seulement ma watchlist",
   sortWl: "Tri : watchlist, puis note", sortLb: "Tri : note Letterboxd", sortImdb: "Tri : note IMDb", sortN: "Tri : nombre de séances",
+  allCards: "Toutes les cartes", cardNone: "aucun cinéma ici",
+  cardTitle: "N'afficher que les cinémas qui acceptent cette carte illimitée (d'après AlloCiné)",
   allLangs: "Toutes les langues", allTheaters: "Tous les cinémas",
   allDay: "Toute la journée", after12: "Après 12h", after17: "Après 17h", after19: "Après 19h", after21: "Après 21h",
   searchPh: "Chercher un film", legVo: "VO sous-titrée", legFr: "Film français", legVf: "VF", loading: "Chargement des séances…",
@@ -465,7 +470,7 @@ function setupPickers() {
 function updateMoreBtn() {
   // sur téléphone, rappelle combien de filtres repliés sont actifs
   const open = $("#more").classList.contains("open");
-  const n = [state.onlyWl, state.ths.size, state.after, state.q, state.lang, state.bairros.size].filter(Boolean).length;
+  const n = [state.onlyWl, state.ths.size, state.after, state.q, state.lang, state.card, state.bairros.size].filter(Boolean).length;
   $("#morebtn").classList.toggle("on", open || n > 0);
   $("#morebtn").textContent = `${T.filters}${n ? ` (${n})` : ""} ${open ? "▴" : "▾"}`;
 }
@@ -482,6 +487,7 @@ function render() {
     if (state.version === "vo" && ver === "vf") continue;
     if (state.version === "vf" && ver !== "vf") continue;
     if (thSel && !thSel.has(tid)) continue;
+    if (state.card && !(DATA.theaters[tid].cards || []).includes(state.card)) continue;
     if (state.bairros.size && !state.bairros.has(DATA.theaters[tid].bairro)) continue;
     if (state.after && +at.slice(11, 13) < +state.after) continue;
     if (!byFilm.has(fid)) byFilm.set(fid, []);
@@ -529,7 +535,7 @@ function renderByTheater(films) {
     const nShows = fl.reduce((n, x) => n + x.shows.length, 0), nWl = fl.filter((x) => x.wl).length;
     return `<article class="cine${nWl ? " wl" : ""}" data-tid="${tid}">
       <h2 class="title">${esc(t.name)}${t.bairro ? `<span class="bairro">${esc(t.bairro)}</span>` : ""}${nWl ? `<span class="badge">${T.wlCount(nWl)}</span>` : ""}</h2>
-      <div class="meta">${t.address ? esc(t.address) + " · " : ""}<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(t.name + " " + (t.address || "Marseille"))}" target="_blank" rel="noopener">Maps</a> · <a href="https://www.allocine.fr/seance/salle_gen_csalle=${tid}.html" target="_blank" rel="noopener">AlloCiné</a></div>
+      <div class="meta">${(t.cards || []).map((c) => esc(CARDS[c] || c) + " · ").join("")}${t.address ? esc(t.address) + " · " : ""}<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(t.name + " " + (t.address || "Marseille"))}" target="_blank" rel="noopener">Maps</a> · <a href="https://www.allocine.fr/seance/salle_gen_csalle=${tid}.html" target="_blank" rel="noopener">AlloCiné</a></div>
       <button class="toggle" type="button">${open ? T.hideFilms : T.showFilms}<small>${esc(T.films(fl.length) + " · " + T.sessions(nShows))}</small></button>
       <div class="cfilms"${open ? "" : " hidden"}>${fl.map(renderCineFilm).join("")}</div>
     </article>`;
@@ -661,6 +667,16 @@ function setupControls() {
   for (const f of Object.values(DATA.films)) for (const l of f.langs || []) count[l] = (count[l] || 0) + 1;
   $("#lang").innerHTML += Object.keys(count).sort((a, b) => count[b] - count[a])
     .map((l) => `<option value="${l}">VO ${esc(langName(l))} (${T.films(count[l])})</option>`).join("");
+  // filtre par carte illimitée ; une carte acceptée nulle part reste visible mais grisée
+  const nCard = (c) => Object.values(DATA.theaters).filter((t) => (t.cards || []).includes(c)).length;
+  $("#card").title = T.cardTitle;
+  $("#card").innerHTML = `<option value="">${T.allCards}</option>` + Object.entries(CARDS).map(([c, name]) => {
+    const n = nCard(c);
+    return `<option value="${c}"${n ? "" : " disabled"}>${esc(name)} (${n ? T.cinemas(n) : T.cardNone})</option>`;
+  }).join("");
+  const savedCard = store.get("card");
+  if (savedCard && nCard(savedCard)) state.card = $("#card").value = savedCard;
+  $("#card").onchange = (e) => { state.card = e.target.value; store.set("card", state.card || null); render(); };
   $("#lang").onchange = (e) => { state.lang = e.target.value; render(); };
   $("#morebtn").onclick = () => {
     $("#more").classList.toggle("open");
