@@ -83,14 +83,26 @@ async function getWatched(user) {
   if (first === null) return null;
   const pages = [...first.matchAll(/\/films\/page\/(\d+)\//g)].map((m) => +m[1]);
   const last = Math.min(Math.max(1, ...pages), 100); // 100 pages = 7 200 films au plus
-  const films = parse(first);
+  const slugs = parseSlugs(first);
   const rest = [];
   for (let p = 2; p <= last; p++) rest.push(p);
   for (let i = 0; i < rest.length; i += 3) {
     const htmls = await Promise.all(rest.slice(i, i + 3).map((p) => fetchPage(user, p, "films")));
-    for (const h of htmls) if (h) films.push(...parse(h));
+    for (const h of htmls) if (h) slugs.push(...parseSlugs(h));
   }
-  return [...new Set(films.map((f) => f[0]))];
+  // page lue mais aucun film reconnu : on le signale plutôt que d'enregistrer une liste vide
+  if (!slugs.length && /\/film\//.test(first) && !/no films/i.test(first)) throw new Error("films vus illisibles");
+  return [...new Set(slugs)];
+}
+
+// Slugs des affiches d'une page de films, quel que soit l'ordre des attributs
+function parseSlugs(html) {
+  const out = [];
+  for (const m of html.matchAll(/<[^>]*?data-component-class="LazyPoster"[^>]*>|<[^>]*?class="[^"]*\bfilm-poster\b[^>]*>/g)) {
+    const t = m[0].match(/data-(?:item|film)-slug="([^"]+)"|data-target-link="\/film\/([^/"]+)\//);
+    if (t) out.push(t[1] || t[2]);
+  }
+  return out;
 }
 
 // Derniers films notés dans le journal (flux RSS, une seule requête) : de quoi tenir

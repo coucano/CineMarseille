@@ -25,8 +25,10 @@ module.exports = async function handler(req, res) {
       const min = Math.ceil((SYNC_COOLDOWN - (Date.now() - rec.t)) / 60e3);
       return send(res, 429, { code: "cooldown", min, error: `Déjà synchronisée récemment, réessaie dans ${min} min`, user, syncedAt: rec.t, films: rec.films, seen: rec.seen || [] });
     }
-    // les pseudos enregistrés avant l'ajout des films vus sont relus une fois
-    if (!rec || wantSync || !rec.seen) {
+    // films vus jamais lus (pseudo enregistré avant leur ajout, ou lecture ratée) : on réessaie,
+    // au plus une fois toutes les 10 minutes
+    const noSeen = rec && !(rec.seen && rec.seen.length) && Date.now() - rec.t >= SYNC_COOLDOWN;
+    if (!rec || wantSync || noSeen) {
       if (!(await store.allowFetch())) {
         const body = { code: "busy", error: "Le site est très sollicité, réessaie dans une minute" };
         return rec ? send(res, 429, { ...body, user, syncedAt: rec.t, films: rec.films, seen: rec.seen || [] }) : send(res, 503, body);

@@ -13,7 +13,7 @@ const SEEN_FULL_EVERY = 30 * 864e5;
 async function syncWatched(user, rec) {
   const old = (rec && rec.seen) || [];
   try {
-    if (rec && rec.seen && rec.seenFull && Date.now() - rec.seenFull < SEEN_FULL_EVERY) {
+    if (rec && rec.seen && rec.seen.length && rec.seenFull && Date.now() - rec.seenFull < SEEN_FULL_EVERY) {
       const recent = await getRecentlyWatched(user);
       return { seen: [...new Set(recent.concat(old))], seenFull: rec.seenFull };
     }
