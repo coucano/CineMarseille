@@ -23,6 +23,9 @@ async function fetchUrl(url, page = 1) {
     const r = await fetch(url, { headers: { "User-Agent": UA, "Accept-Language": "en" } });
     if (r.status === 404) return null;
     if (r.ok) return r.text();
+    // 403 : page protégée par Cloudflare (c'est le cas des pages 2 et suivantes des films vus),
+    // inutile d'insister
+    if (r.status === 403) throw Object.assign(new Error(`Letterboxd refuse la page ${page}`), { blocked: true });
     await new Promise((res) => setTimeout(res, 800 * (i + 1)));
   }
   throw new Error(`Letterboxd a répondu une erreur pour la page ${page}`);
@@ -76,23 +79,25 @@ async function getNewEntries(user, known, maxPages = 5) {
   return undefined;
 }
 
-// Tous les films marqués « vus » par le membre (pages /films/, 72 films par page), lus
-// trois pages à la fois pour ménager Letterboxd
+// Films marqués « vus » par le membre (pages /films/, 72 films par page, des plus récents aux
+// plus anciens). Letterboxd ne laisse souvent lire que la première page (les suivantes sont
+// protégées par Cloudflare) : on lit ce qu'on peut et on signale si la liste est incomplète.
+// Renvoie { slugs, complete }, ou null si le membre n'existe pas.
 async function getWatched(user) {
   const first = await fetchPage(user, 1, "films");
   if (first === null) return null;
   const pages = [...first.matchAll(/\/films\/page\/(\d+)\//g)].map((m) => +m[1]);
   const last = Math.min(Math.max(1, ...pages), 100); // 100 pages = 7 200 films au plus
   const slugs = parseSlugs(first);
-  const rest = [];
-  for (let p = 2; p <= last; p++) rest.push(p);
-  for (let i = 0; i < rest.length; i += 3) {
-    const htmls = await Promise.all(rest.slice(i, i + 3).map((p) => fetchPage(user, p, "films")));
-    for (const h of htmls) if (h) slugs.push(...parseSlugs(h));
-  }
   // page lue mais aucun film reconnu : on le signale plutôt que d'enregistrer une liste vide
   if (!slugs.length && /\/film\//.test(first) && !/no films/i.test(first)) throw new Error("films vus illisibles");
-  return [...new Set(slugs)];
+  let complete = true;
+  for (let p = 2; p <= last && complete; p += 3) {
+    const batch = [p, p + 1, p + 2].filter((n) => n <= last);
+    const htmls = await Promise.all(batch.map((n) => fetchPage(user, n, "films").catch(() => (complete = false, null))));
+    for (const h of htmls) if (h) slugs.push(...parseSlugs(h));
+  }
+  return { slugs: [...new Set(slugs)], complete };
 }
 
 // Slugs des affiches d'une page de films, quel que soit l'ordre des attributs

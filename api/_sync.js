@@ -8,20 +8,28 @@ const store = require("./_store");
 
 const FULL_EVERY = 7 * 864e5;
 const SEEN_FULL_EVERY = 30 * 864e5;
+const SEEN_RETRY = 7 * 864e5;
 
-// Renvoie toujours { seen, seenFull } : en cas d'erreur, on garde les films vus déjà connus
+// Renvoie toujours { seen, seenFull } : en cas d'erreur, on garde les films vus déjà connus.
+// Les derniers films du journal (flux RSS) sont toujours ajoutés.
 async function syncWatched(user, rec) {
   const old = (rec && rec.seen) || [];
+  const recent = getRecentlyWatched(user).catch((e) => (console.log(`journal de ${user} : ${e.message}`), []));
+  let seen = old, seenFull = (rec && rec.seenFull) || 0;
   try {
-    if (rec && rec.seen && rec.seen.length && rec.seenFull && Date.now() - rec.seenFull < SEEN_FULL_EVERY) {
-      const recent = await getRecentlyWatched(user);
-      return { seen: [...new Set(recent.concat(old))], seenFull: rec.seenFull };
+    if (!(old.length && seenFull && Date.now() - seenFull < SEEN_FULL_EVERY)) {
+      const w = await getWatched(user);
+      if (w) {
+        // liste complète : elle remplace l'ancienne (films retirés compris) ; sinon on complète
+        seen = w.complete ? w.slugs : [...new Set(w.slugs.concat(old))];
+        // liste incomplète : on retentera une relecture dans une semaine plutôt que dans un mois
+        seenFull = w.complete ? Date.now() : Date.now() - SEEN_FULL_EVERY + SEEN_RETRY;
+      }
     }
-    return { seen: (await getWatched(user)) || [], seenFull: Date.now() };
   } catch (e) {
     console.log(`films vus de ${user} : ${e.message}`);
-    return { seen: old, seenFull: (rec && rec.seenFull) || 0 };
   }
+  return { seen: [...new Set((await recent).concat(seen))], seenFull };
 }
 
 async function syncUser(user, rec) {
