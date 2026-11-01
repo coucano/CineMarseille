@@ -15,7 +15,7 @@ async function redis(...cmds) {
   return (await r.json()).map((x) => x.result);
 }
 
-// Chaque pseudo : wl:<pseudo> = { t: date de synchro, films }, plus deux index triés
+// Chaque pseudo : wl:<pseudo> = { t: date de synchro, films, seen }, plus deux index triés
 // par date de synchro (« synced ») et de dernière visite (« seen »).
 // visit=false : lecture par la synchro de nuit, qui ne compte pas comme une visite
 async function load(user, visit = true) {
@@ -26,9 +26,10 @@ async function load(user, visit = true) {
   return v ? JSON.parse(v) : null;
 }
 
-// t : dernière synchro ; full : dernière relecture complète
-async function save(user, films, full = Date.now()) {
-  const rec = { t: Date.now(), full, films };
+// t : dernière synchro ; full : dernière relecture complète de la watchlist ;
+// seen : films vus, seenFull : dernière relecture complète des films vus
+async function save(user, { films, full = Date.now(), seen = [], seenFull = 0 }) {
+  const rec = { t: Date.now(), full, films, seen, seenFull };
   if (!URL_) return memory.set(user, rec), rec;
   await redis(
     ["SET", `wl:${user}`, JSON.stringify(rec)],

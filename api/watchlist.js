@@ -1,6 +1,6 @@
 // GET /api/watchlist?user=pseudo         -> watchlist gardée sur le site (lue sur Letterboxd la première fois)
 // GET /api/watchlist?user=pseudo&sync=1  -> resynchronise avec Letterboxd (au plus une fois toutes les 10 min)
-// Réponse : { user, syncedAt, films: [[slug, titre, année], ...] }
+// Réponse : { user, syncedAt, films: [[slug, titre, année], ...], seen: [slug des films vus, ...] }
 
 const { syncUser } = require("./_sync");
 const store = require("./_store");
@@ -23,18 +23,19 @@ module.exports = async function handler(req, res) {
     const wantSync = q.get("sync") === "1";
     if (rec && wantSync && Date.now() - rec.t < SYNC_COOLDOWN) {
       const min = Math.ceil((SYNC_COOLDOWN - (Date.now() - rec.t)) / 60e3);
-      return send(res, 429, { code: "cooldown", min, error: `Déjà synchronisée récemment, réessaie dans ${min} min`, user, syncedAt: rec.t, films: rec.films });
+      return send(res, 429, { code: "cooldown", min, error: `Déjà synchronisée récemment, réessaie dans ${min} min`, user, syncedAt: rec.t, films: rec.films, seen: rec.seen || [] });
     }
-    if (!rec || wantSync) {
+    // les pseudos enregistrés avant l'ajout des films vus sont relus une fois
+    if (!rec || wantSync || !rec.seen) {
       if (!(await store.allowFetch())) {
         const body = { code: "busy", error: "Le site est très sollicité, réessaie dans une minute" };
-        return rec ? send(res, 429, { ...body, user, syncedAt: rec.t, films: rec.films }) : send(res, 503, body);
+        return rec ? send(res, 429, { ...body, user, syncedAt: rec.t, films: rec.films, seen: rec.seen || [] }) : send(res, 503, body);
       }
       const synced = await syncUser(user, rec);
       if (synced === null) return send(res, 404, { code: "notfound", error: "Membre introuvable ou watchlist privée" });
       rec = synced;
     }
-    send(res, 200, { user, syncedAt: rec.t, stored: store.hasDatabase, films: rec.films });
+    send(res, 200, { user, syncedAt: rec.t, stored: store.hasDatabase, films: rec.films, seen: rec.seen || [] });
   } catch (e) {
     send(res, 502, { error: String(e.message || e) });
   }

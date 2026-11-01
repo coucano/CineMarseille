@@ -1,4 +1,5 @@
-// Lecture de la watchlist publique d'un membre Letterboxd : [[slug, titre, année], ...]
+// Lecture sur Letterboxd des listes publiques d'un membre : sa watchlist ([[slug, titre, année], ...])
+// et ses films vus (seulement les slugs, pour prendre peu de place)
 
 const UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
@@ -12,8 +13,12 @@ function decode(s) {
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n));
 }
 
-async function fetchPage(user, page) {
-  const url = `https://letterboxd.com/${user}/watchlist/` + (page > 1 ? `page/${page}/` : "");
+async function fetchPage(user, page, kind = "watchlist") {
+  const url = `https://letterboxd.com/${user}/${kind}/` + (page > 1 ? `page/${page}/` : "");
+  return fetchUrl(url, page);
+}
+
+async function fetchUrl(url, page = 1) {
   for (let i = 0; i < 3; i++) {
     const r = await fetch(url, { headers: { "User-Agent": UA, "Accept-Language": "en" } });
     if (r.status === 404) return null;
@@ -71,4 +76,34 @@ async function getNewEntries(user, known, maxPages = 5) {
   return undefined;
 }
 
-module.exports = { getWatchlist, getNewEntries };
+// Tous les films marqués « vus » par le membre (pages /films/, 72 films par page), lus
+// trois pages à la fois pour ménager Letterboxd
+async function getWatched(user) {
+  const first = await fetchPage(user, 1, "films");
+  if (first === null) return null;
+  const pages = [...first.matchAll(/\/films\/page\/(\d+)\//g)].map((m) => +m[1]);
+  const last = Math.min(Math.max(1, ...pages), 100); // 100 pages = 7 200 films au plus
+  const films = parse(first);
+  const rest = [];
+  for (let p = 2; p <= last; p++) rest.push(p);
+  for (let i = 0; i < rest.length; i += 3) {
+    const htmls = await Promise.all(rest.slice(i, i + 3).map((p) => fetchPage(user, p, "films")));
+    for (const h of htmls) if (h) films.push(...parse(h));
+  }
+  return [...new Set(films.map((f) => f[0]))];
+}
+
+// Derniers films notés dans le journal (flux RSS, une seule requête) : de quoi tenir
+// la liste des films vus à jour entre deux relectures complètes
+async function getRecentlyWatched(user) {
+  const xml = await fetchUrl(`https://letterboxd.com/${user}/rss/`);
+  if (xml === null) return [];
+  const slugs = new Set();
+  for (const item of xml.split("<item>").slice(1)) {
+    const link = item.match(/<link>https:\/\/letterboxd\.com\/[^/]+\/film\/([^/<]+)\//);
+    if (link) slugs.add(link[1]);
+  }
+  return [...slugs];
+}
+
+module.exports = { getWatchlist, getNewEntries, getWatched, getRecentlyWatched };

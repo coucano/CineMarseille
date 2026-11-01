@@ -58,6 +58,11 @@
   .cf-poster { width: 46px; flex: none; }
   .cf-title { font-weight: 700; font-size: 15px; }
   .badge.tag { text-transform: none; letter-spacing: 0; }
+  .badge.seen { background: #556270; }
+  .film.seen:not(.wl), .cf.seen:not(.wl) { opacity: .6; }
+  .film.seen:hover, .cf.seen:hover { opacity: 1; }
+  .seenbtn { font-size: 12px; padding: 2px 8px; margin-left: 8px; color: var(--muted); vertical-align: 1px; }
+  .seenbtn.on { color: var(--text); background: #3d4a57; }
   .badge.preview { background: #b5179e; }
   .badge.reprise { background: #6c5ce7; }
   .note { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 7px; border-radius: 10px; vertical-align: 3px; margin-left: 6px; background: #2c3440; }
@@ -172,6 +177,7 @@
   </div>
   <div id="more">
     <label class="chk"><input type="checkbox" id="onlywl"> <span data-i18n="onlyWl"></span></label>
+    <label class="chk" data-i18n-title="seenLastTitle"><input type="checkbox" id="seenlast"> <span data-i18n="seenLast"></span></label>
     <select id="sort">
       <option value="wl" data-i18n="sortWl"></option>
       <option value="lb" data-i18n="sortLb"></option>
@@ -210,7 +216,7 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
-const state = { day: "", version: "all", onlyWl: false, ths: new Set(), after: "", q: "", sort: "wl", lang: "", card: "", bairros: new Set(), view: "film" };
+const state = { day: "", version: "all", onlyWl: false, seenLast: true, ths: new Set(), after: "", q: "", sort: "wl", lang: "", card: "", bairros: new Set(), view: "film" };
 const ZONES = ["Marseille", "Aix-en-Provence", "Autres"];
 // cartes illimitées (champ « cards » de chaque cinéma, lu sur AlloCiné)
 const CARDS = { ugc: "UGC Illimité", pathe: "CinéPass Pathé" };
@@ -245,6 +251,9 @@ const T = {
   updated: (d) => `Mis à jour le ${d}.`,
   viewFilm: "Par film", viewTh: "Par cinéma", showFilms: "▸ Voir les films ", hideFilms: "▾ Masquer les films ",
   wlCount: (n) => `${n} de ta watchlist`,
+  seenLast: "Films vus en bas", seenLastTitle: "Mettre en fin de liste les films déjà vus (d'après Letterboxd, ou marqués « vu » ici)",
+  seen: "Vu", markSeen: "Vu ?", markSeenTip: "Marquer ce film comme vu (gardé sur cet appareil)", unmarkSeen: "Marquer comme pas vu",
+  ofSeen: (n) => `, ${n} déjà vus`, seenN: (n) => ` · ${n} films vus`,
   buy: "acheter sa place", buyHint: "Touche un horaire pour acheter ta place.",
   reprise: "Reprise", repriseTip: "Film ancien qui ressort en salles",
   preview: "Avant-première", previewTip: (d) => `Sortie en salles le ${d}`,
@@ -272,6 +281,10 @@ const store = {
   set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
 };
 let WL = null;
+let SEEN = null; // slugs Letterboxd des films vus
+// films marqués à la main sur cet appareil : identifiant AlloCiné -> true (vu) ou false (pas vu)
+let MARKS = {};
+try { MARKS = JSON.parse(store.get("vus") || "{}") || {}; } catch {}
 const OPEN = new Set();
 const OPENTH = new Set(); // cinémas dépliés dans la vue par cinéma // films dont les séances sont dépliées // { slugs:Set, titles:Map(norm -> [years]) }
 
@@ -294,36 +307,53 @@ function dayLabel(d, short) {
     : { weekday: "long", day: "numeric", month: "short", timeZone: "UTC" });
 }
 
-function inWatchlist(f) {
-  if (!WL) return false;
-  if (f.lb && WL.slugs.has(f.lb)) return true;
+// un film est-il dans la liste (watchlist ou films vus) ? d'après le lien Letterboxd, sinon titre et année
+function inList(L, f) {
+  if (!L) return false;
+  if (f.lb && L.slugs.has(f.lb)) return true;
   const years = [f.year, f.release && +f.release.slice(0, 4)].filter(Boolean);
   for (const t of [f.original, f.title]) {
-    const ys = WL.titles.get(norm(t));
+    const ys = L.titles.get(norm(t));
     if (ys && (!years.length || ys.some((y) => !y || years.some((fy) => Math.abs(fy - y) <= 1)))) return true;
   }
   return false;
 }
+const inWatchlist = (f) => inList(WL, f);
+const seenOnLb = (f) => !!(SEEN && f.lb && SEEN.has(f.lb));
+const isSeen = (id, f) => (id in MARKS ? MARKS[id] : seenOnLb(f));
 
-function setWatchlist(films) {
-  WL = { slugs: new Set(), titles: new Map() };
-  for (const [slug, name, year] of films) {
-    WL.slugs.add(slug);
+function setWatchlist(films, seen) {
+  WL = indexFilms(films);
+  SEEN = new Set(seen || []);
+}
+function indexFilms(films) {
+  const L = { slugs: new Set(), titles: new Map() };
+  for (const [slug, name, year] of films || []) {
+    L.slugs.add(slug);
     const k = norm(name);
-    if (!WL.titles.has(k)) WL.titles.set(k, []);
-    WL.titles.get(k).push(year);
+    if (!L.titles.has(k)) L.titles.set(k, []);
+    L.titles.get(k).push(year);
   }
+  return L;
+}
+
+function toggleSeen(id) {
+  const f = DATA.films[id], now = !isSeen(id, f);
+  // revenir à ce que dit Letterboxd quand la marque devient inutile
+  if (now === seenOnLb(f)) delete MARKS[id]; else MARKS[id] = now;
+  store.set("vus", Object.keys(MARKS).length ? JSON.stringify(MARKS) : null);
+  render();
 }
 
 async function loadWatchlist(user, sync) {
   const st = $("#wlstatus");
   user = user.trim().toLowerCase().replace(/^@/, "").replace(/.*letterboxd\.com\//, "").replace(/\/.*/, "");
   $("#sync").hidden = true;
-  if (!user) { WL = null; st.textContent = ""; store.set("lbuser", null); render(); return; }
+  if (!user) { WL = SEEN = null; st.textContent = ""; store.set("lbuser", null); render(); return; }
   $("#user").value = user;
   let syncedAt = null, note = "";
   if (window.EMBED_WATCHLIST && window.EMBED_WATCHLIST.user === user) {
-    setWatchlist(window.EMBED_WATCHLIST.films);
+    setWatchlist(window.EMBED_WATCHLIST.films, window.EMBED_WATCHLIST.seen);
   } else {
     // la watchlist est gardée sur le site et resynchronisée chaque semaine (ou via le bouton)
     try {
@@ -332,10 +362,10 @@ async function loadWatchlist(user, sync) {
       const j = await r.json();
       if (!r.ok && !j.films) throw new Error(apiError(j));
       if (!r.ok) note = " · " + apiError(j);
-      setWatchlist(j.films);
+      setWatchlist(j.films, j.seen);
       syncedAt = j.syncedAt;
     } catch (e) {
-      WL = null; st.className = "err"; st.textContent = T.wlNotFound(e.message); render(); return;
+      WL = SEEN = null; st.className = "err"; st.textContent = T.wlNotFound(e.message); render(); return;
     }
   }
   store.set("lbuser", user);
@@ -344,7 +374,7 @@ async function loadWatchlist(user, sync) {
   if (!WL.slugs.size) { st.className = "err"; st.textContent = T.wlEmpty(user) + note; render(); return; }
   const n = Object.values(DATA.films).filter(inWatchlist).length;
   st.className = "ok";
-  st.textContent = T.wlOk(WL.slugs.size, user, n) + (syncedAt ? " · " + T.synced(ago(syncedAt)) : "") + note;
+  st.textContent = T.wlOk(WL.slugs.size, user, n) + (SEEN.size ? T.seenN(SEEN.size) : "") + (syncedAt ? " · " + T.synced(ago(syncedAt)) : "") + note;
   render();
 }
 
@@ -496,7 +526,7 @@ function render() {
   let films = [...byFilm.keys()].map((id) => ({ id, f: DATA.films[id], shows: byFilm.get(id) }));
   if (state.lang) films = films.filter(({ f }) => (f.langs || []).includes(state.lang));
   if (q) films = films.filter(({ f }) => norm([f.title, f.original, ...f.directors].join(" ")).includes(q));
-  films.forEach((x) => (x.wl = inWatchlist(x.f)));
+  films.forEach((x) => { x.wl = inWatchlist(x.f); x.seen = isSeen(x.id, x.f); });
   if (state.onlyWl) films = films.filter((x) => x.wl);
   const by = {
     wl: (a, b) => (b.wl - a.wl) || (b.f.lbRating || 0) - (a.f.lbRating || 0) || (b.f.imdbRating || 0) - (a.f.imdbRating || 0),
@@ -504,10 +534,12 @@ function render() {
     imdb: (a, b) => (b.f.imdbRating || 0) - (a.f.imdbRating || 0) || (b.f.lbRating || 0) - (a.f.lbRating || 0),
     n: (a, b) => b.shows.length - a.shows.length,
   };
-  films.sort(by[state.sort] || by.wl);
+  const cmp = by[state.sort] || by.wl;
+  films.sort(state.seenLast ? (a, b) => (a.seen - b.seen) || cmp(a, b) : cmp);
+  const nSeen = films.filter((x) => x.seen).length;
 
   $("#count").textContent = films.length
-    ? T.films(films.length) + (WL ? T.ofWl(films.filter((x) => x.wl).length) : "")
+    ? T.films(films.length) + (WL ? T.ofWl(films.filter((x) => x.wl).length) : "") + (nSeen ? T.ofSeen(nSeen) : "")
     : "";
   if (!films.length) {
     $("#list").innerHTML = `<div class="empty">${state.onlyWl && !WL ? T.noWl : T.noShows}</div>`;
@@ -542,7 +574,11 @@ function renderByTheater(films) {
   }).join("");
 }
 
-function renderCineFilm({ f, shows, wl }) {
+function seenButton(id, seen) {
+  return `<button type="button" class="seenbtn${seen ? " on" : ""}" data-seen="${id}" title="${esc(seen ? T.unmarkSeen : T.markSeenTip)}">${seen ? "✓ " + T.seen : T.markSeen}</button>`;
+}
+
+function renderCineFilm({ id, f, shows, wl, seen }) {
   const days = new Map();
   for (const s of shows) {
     const d = s[2].slice(0, 10);
@@ -552,10 +588,10 @@ function renderCineFilm({ f, shows, wl }) {
   const isPreview = f.premiere || (f.release && shows.some((s) => s[2].slice(0, 10) < f.release));
   const notes = [f.lbRating && `<span class="note lb">★ ${f.lbRating.toFixed(1)}</span>`,
     f.imdbRating && `<span class="note imdb">IMDb ${f.imdbRating.toFixed(1)}</span>`].filter(Boolean).join("");
-  return `<div class="cf${wl ? " wl" : ""}">
+  return `<div class="cf${wl ? " wl" : ""}${seen ? " seen" : ""}">
     <div class="cf-poster">${f.poster ? `<img loading="lazy" src="${esc(posterUrl(f.poster))}" alt="">` : ""}</div>
     <div class="body">
-      <div class="cf-title">${esc(mainTitle(f))}${wl ? '<span class="badge">Watchlist</span>' : ""}${isPreview ? `<span class="badge tag preview">${T.preview}</span>` : ""}${f.reprise ? `<span class="badge tag reprise">${T.reprise}</span>` : ""}${notes}</div>
+      <div class="cf-title">${esc(mainTitle(f))}${wl ? '<span class="badge">Watchlist</span>' : ""}${isPreview ? `<span class="badge tag preview">${T.preview}</span>` : ""}${f.reprise ? `<span class="badge tag reprise">${T.reprise}</span>` : ""}${notes}${seenButton(id, seen)}</div>
       ${otherTitles(f)}
       ${[...days.entries()].map(([d, ss]) => `<div class="day">${state.day ? "" : `<b>${esc(dayLabel(d, true))}</b>`}
         <span class="times">${ss.map((x) => renderTime(x, f)).join("")}</span></div>`).join("")}
@@ -563,7 +599,7 @@ function renderCineFilm({ f, shows, wl }) {
   </div>`;
 }
 
-function renderFilm({ id, f, shows, wl }) {
+function renderFilm({ id, f, shows, wl, seen }) {
   const byTh = new Map();
   for (const s of shows) {
     if (!byTh.has(s[1])) byTh.set(s[1], new Map());
@@ -593,13 +629,13 @@ function renderFilm({ id, f, shows, wl }) {
   const vers = new Set(shows.map((s) => s[3]));
   const summary = esc(`${T.sessions(shows.length)} · ${T.cinemas(ths.length)} · `
     + [vers.has("vo") && "VO", vers.has("fr") && T.verFr, vers.has("vf") && T.verVf].filter(Boolean).join(", "));
-  return `<article class="film${wl ? " wl" : ""}" data-id="${id}">
+  return `<article class="film${wl ? " wl" : ""}${seen ? " seen" : ""}" data-id="${id}">
     <div class="poster">${f.poster ? `<img loading="lazy" src="${esc(posterUrl(f.poster))}" alt="">` : ""}</div>
     <div class="body">
       <h2 class="title">${esc(mainTitle(f))}${wl ? '<span class="badge">Watchlist</span>' : ""}${tags}${notes}</h2>
       ${otherTitles(f)}
       <div class="meta">${meta}<span class="links"> · ${links}</span></div>
-      <button class="toggle" type="button">${OPEN.has(id) ? T.hide : T.show}<small>${summary}</small></button>
+      <button class="toggle" type="button">${OPEN.has(id) ? T.hide : T.show}<small>${summary}</small></button>${seenButton(id, seen)}
       <div class="shows"${OPEN.has(id) ? "" : " hidden"}>
       <div class="meta mlinks">${links}</div>
       ${ths.map(([tid, days]) => `<div class="th">
@@ -687,6 +723,8 @@ function setupControls() {
   $("#after").onchange = (e) => { state.after = e.target.value; render(); };
   $("#q").oninput = (e) => { state.q = e.target.value; render(); };
   $("#onlywl").onchange = (e) => { state.onlyWl = e.target.checked; render(); };
+  state.seenLast = $("#seenlast").checked = store.get("seenlast") !== "0";
+  $("#seenlast").onchange = (e) => { state.seenLast = e.target.checked; store.set("seenlast", state.seenLast ? null : "0"); render(); };
   const setView = (w) => {
     state.view = w; store.set("view", w);
     document.querySelectorAll("#view button").forEach((x) => x.classList.toggle("on", x.dataset.w === w));
@@ -704,6 +742,8 @@ function setupControls() {
   $("#list").onclick = (e) => {
     const go = e.target.closest("[data-goto]");
     if (go) { e.preventDefault(); goToTheater(go.dataset.goto); return; }
+    const sb = e.target.closest("[data-seen]");
+    if (sb) { toggleSeen(sb.dataset.seen); return; }
     if (e.target.closest("a, .shows, .cfilms")) return;
     const cine = e.target.closest(".cine");
     if (cine) {
