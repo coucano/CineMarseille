@@ -3,6 +3,8 @@
 Les séances de cinéma de la semaine à Marseille et Aix-en-Provence (source : AlloCiné), avec les films
 de ta watchlist Letterboxd mis en évidence et un filtre VO / VF.
 
+Le site : https://cine-marseille.vercel.app/
+
 Adapté de [cine-rio](https://github.com/coucano/cine-rio).
 
 - `scripts/scrape.py` récupère les séances des cinémas listés par AlloCiné pour Marseille et Aix
