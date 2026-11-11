@@ -105,6 +105,9 @@
   .thlink { text-decoration: none; }
   .thlink:hover { text-decoration: underline; }
   .th-name .bairro { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 4px; }
+  .city { margin: 14px 0 2px; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 3px; }
+  #list > .city { margin: 18px 0 8px; font-size: 13px; }
+  #list > .city:first-child { margin-top: 4px; }
   .mlinks { display: none; }
   #morebtn { display: none; }
   /* téléphone, y compris tenu à l'horizontale (écran peu haut) */
@@ -218,6 +221,14 @@
 const $ = (s) => document.querySelector(s);
 const state = { day: "", version: "all", onlyWl: false, seenLast: true, ths: new Set(), after: "", q: "", sort: "wl", lang: "", card: "", bairros: new Set(), view: "film" };
 const ZONES = ["Marseille", "Aix-en-Provence", "Autres"];
+// rang de la ville d'un cinéma (Marseille, puis Aix), pour trier les séances par ville
+const zoneRank = (t) => { const i = ZONES.indexOf(t.zone); return i < 0 ? 99 : i; };
+const byCity = (a, b) => { const A = DATA.theaters[a], B = DATA.theaters[b]; return zoneRank(A) - zoneRank(B) || A.name.localeCompare(B.name, "fr"); };
+// intertitre de ville, ajouté devant le premier cinéma de chaque ville
+const cityHead = (tid, prev) => {
+  const z = DATA.theaters[tid].zone || T.other;
+  return prev !== undefined && (DATA.theaters[prev].zone || T.other) === z ? "" : `<div class="city">${esc(z)}</div>`;
+};
 // cartes illimitées (champ « cards » de chaque cinéma, lu sur AlloCiné)
 const CARDS = { ugc: "UGC Illimité", pathe: "CinéPass Pathé" };
 
@@ -557,15 +568,11 @@ function renderByTheater(films) {
     if (!m.has(x.id)) m.set(x.id, { ...x, shows: [] });
     m.get(x.id).shows.push(s);
   }
-  const zi = (t) => { const i = ZONES.indexOf(t.zone); return i < 0 ? 99 : i; };
-  const ths = [...byTh.keys()].sort((a, b) => {
-    const A = DATA.theaters[a], B = DATA.theaters[b];
-    return zi(A) - zi(B) || A.name.localeCompare(B.name);
-  });
-  return ths.map((tid) => {
+  const ths = [...byTh.keys()].sort(byCity);
+  return ths.map((tid, i) => {
     const t = DATA.theaters[tid], fl = [...byTh.get(tid).values()], open = OPENTH.has(tid);
     const nShows = fl.reduce((n, x) => n + x.shows.length, 0), nWl = fl.filter((x) => x.wl).length;
-    return `<article class="cine${nWl ? " wl" : ""}" data-tid="${tid}">
+    return `${cityHead(tid, ths[i - 1])}<article class="cine${nWl ? " wl" : ""}" data-tid="${tid}">
       <h2 class="title">${esc(t.name)}${t.bairro ? `<span class="bairro">${esc(t.bairro)}</span>` : ""}${nWl ? `<span class="badge">${T.wlCount(nWl)}</span>` : ""}</h2>
       <div class="meta">${(t.cards || []).map((c) => esc(CARDS[c] || c) + " · ").join("")}${t.address ? esc(t.address) + " · " : ""}<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(t.name + " " + (t.address || "Marseille"))}" target="_blank" rel="noopener">Maps</a> · <a href="https://www.allocine.fr/seance/salle_gen_csalle=${tid}.html" target="_blank" rel="noopener">AlloCiné</a></div>
       <button class="toggle" type="button">${open ? T.hideFilms : T.showFilms}<small>${esc(T.films(fl.length) + " · " + T.sessions(nShows))}</small></button>
@@ -608,7 +615,7 @@ function renderFilm({ id, f, shows, wl, seen }) {
     if (!days.has(d)) days.set(d, []);
     days.get(d).push(s);
   }
-  const ths = [...byTh.entries()].sort((a, b) => DATA.theaters[a[0]].name.localeCompare(DATA.theaters[b[0]].name));
+  const ths = [...byTh.entries()].sort((a, b) => byCity(a[0], b[0]));
   // avant-première : séance avant la sortie officielle en salles
   const isPreview = f.premiere || (f.release && shows.some((s) => s[2].slice(0, 10) < f.release));
   const relDate = f.release && new Date(f.release + "T12:00:00Z").toLocaleDateString(LOCALE, { day: "numeric", month: "long", timeZone: "UTC" });
@@ -638,7 +645,7 @@ function renderFilm({ id, f, shows, wl, seen }) {
       <button class="toggle" type="button">${OPEN.has(id) ? T.hide : T.show}<small>${summary}</small></button>${seenButton(id, seen)}
       <div class="shows"${OPEN.has(id) ? "" : " hidden"}>
       <div class="meta mlinks">${links}</div>
-      ${ths.map(([tid, days]) => `<div class="th">
+      ${ths.map(([tid, days], i) => `${cityHead(tid, i ? ths[i - 1][0] : undefined)}<div class="th">
         <div class="th-name"><a href="#" class="thlink" data-goto="${tid}">${esc(DATA.theaters[tid].name)}</a>${DATA.theaters[tid].bairro && !norm(DATA.theaters[tid].name).includes(norm(DATA.theaters[tid].bairro)) ? `<span class="bairro">${esc(DATA.theaters[tid].bairro)}</span>` : ""}</div>
         ${[...days.entries()].map(([d, ss]) => `<div class="day">${state.day ? "" : `<b>${esc(dayLabel(d, true))}</b>`}
           <span class="times">${ss.map((x) => renderTime(x, f)).join("")}</span></div>`).join("")}
